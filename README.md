@@ -227,5 +227,4 @@ The service is configured for cloud deployment on platforms like Render or Koyeb
 
 ## Assumptions and Tradeoffs
 - **Storage Choice (SQLite vs PostgreSQL)**: SQLite was selected for simple local testing and immediate execution without external software dependencies. In a high-traffic production system, a managed database like PostgreSQL would be used to support concurrent write locks and scaling.
-- **Ephemeral Disk Behavior**: Free cloud tiers wipe local files when containers restart. On cloud hosting, re-ingesting events populates the database cleanly for testing sessions.
-- **Database Lookups vs Memory Overhead**: To optimize ingestion speed, the system queries existing IDs in bulk using SQL `.in_()` clauses rather than issuing single lookups per record. This approach keeps write speeds fast and prevents database connections from hanging.
+- **Disk Behavior**: Free cloud tiers wipe local files when containers restart. On cloud hosting, re-ingesting events populates the database cleanly for testing sessions.
