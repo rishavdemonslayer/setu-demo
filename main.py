@@ -31,16 +31,15 @@ app = FastAPI(
 def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate], db: Session = Depends(get_db)):
     is_bulk = isinstance(payload, list)
     events = payload if is_bulk else [payload]
-
     unique_events = {}
     for e in events:
         if e.event_id not in unique_events:
             unique_events[e.event_id] = e
-
     incoming_ids = list(unique_events.keys())
     existing_events = db.query(models.Event.id).filter(models.Event.id.in_(incoming_ids)).all()
     existing_ids = {e.id for e in existing_events}
     new_events_data = [e for e in unique_events.values() if e.event_id not in existing_ids]
+
     if not new_events_data:
         if is_bulk:
             return {
@@ -55,39 +54,48 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
     transaction_ids = {e.transaction_id for e in new_events_data}
 
     existing_merchants = {
-        m.id: m for m in db.query(models.Merchant).filter(models.Merchant.id.in_(merchant_ids)).all()
+        m.id for m in db.query(models.Merchant.id).filter(models.Merchant.id.in_(merchant_ids)).all()
     }
     existing_txs = {
         t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
     }
+    new_merchants = []
+    new_transactions = []
+    new_events = []
+    added_merchants = set(existing_merchants)
 
     for event in new_events_data:
-        if event.merchant_id not in existing_merchants:
-            new_m = models.Merchant(id=event.merchant_id, name=event.merchant_name)
-            db.add(new_m)
-            existing_merchants[event.merchant_id] = new_m
+        if event.merchant_id not in added_merchants:
+            new_merchants.append({"id": event.merchant_id, "name": event.merchant_name})
+            added_merchants.add(event.merchant_id)
 
         if event.transaction_id not in existing_txs:
-            new_tx = models.Transaction(
-                id=event.transaction_id,
-                merchant_id=event.merchant_id,
-                amount=event.amount,
-                currency=event.currency,
-                status=event.event_type
-            )
-            db.add(new_tx)
-            existing_txs[event.transaction_id] = new_tx
+            new_transactions.append({
+                "id": event.transaction_id,
+                "merchant_id": event.merchant_id,
+                "amount": event.amount,
+                "currency": event.currency,
+                "status": event.event_type
+            })
+            existing_txs[event.transaction_id] = models.Transaction(status=event.event_type)
         else:
             existing_txs[event.transaction_id].status = event.event_type
 
-        new_event = models.Event(
-            id=event.event_id,
-            transaction_id=event.transaction_id,
-            event_type=event.event_type,
-            timestamp=event.timestamp
-        )
-        db.add(new_event)
+        new_events.append({
+            "id": event.event_id,
+            "transaction_id": event.transaction_id,
+            "event_type": event.event_type,
+            "timestamp": event.timestamp
+        })
+    if new_merchants:
+        db.bulk_insert_mappings(models.Merchant, new_merchants)
+    if new_transactions:
+        db.bulk_insert_mappings(models.Transaction, new_transactions)
+    if new_events:
+        db.bulk_insert_mappings(models.Event, new_events)
+
     db.commit()
+
     if is_bulk:
         return {
             "message": "Bulk ingestion complete",
@@ -96,7 +104,6 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
         }
     else:
         return {"message": "Event ingested successfully"}
-
 @app.get("/transactions", response_model=list[schemas.TransactionResponse])
 def list_transactions(
     merchant_id: str = None,
