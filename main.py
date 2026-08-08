@@ -61,20 +61,15 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
             t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
         }
 
-        # Prepare raw dictionaries for bulk insert
         new_merchants = {}
         new_transactions = {}
         new_events = []
 
         for event in new_events_data:
-            # Handle Merchant
             if event.merchant_id not in existing_merchants and event.merchant_id not in new_merchants:
                 new_merchants[event.merchant_id] = {"id": event.merchant_id, "name": event.merchant_name}
-
-            # Handle Transaction
             if event.transaction_id not in existing_txs:
                 if event.transaction_id not in new_transactions:
-                    # Create the initial state
                     new_transactions[event.transaction_id] = {
                         "id": event.transaction_id,
                         "merchant_id": event.merchant_id,
@@ -83,13 +78,9 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
                         "status": event.event_type
                     }
                 else:
-                    # Dynamically update the status in the pending dictionary
                     new_transactions[event.transaction_id]["status"] = event.event_type
             else:
-                # Update the existing tracked SQLAlchemy object
                 existing_txs[event.transaction_id].status = event.event_type
-
-            # Handle Event
             new_events.append({
                 "id": event.event_id,
                 "transaction_id": event.transaction_id,
@@ -97,7 +88,6 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
                 "timestamp": event.timestamp
             })
 
-        # Execute ultra-fast bulk inserts
         if new_merchants:
             db.bulk_insert_mappings(models.Merchant, list(new_merchants.values()))
         if new_transactions:
