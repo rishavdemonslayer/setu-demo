@@ -22,6 +22,7 @@ def verify_api_key(api_key: str = Depends(api_key_header)):
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
         )
+
 app = FastAPI(
     title="Reconciliation Service",
     dependencies=[Depends(verify_api_key)]
@@ -31,10 +32,12 @@ app = FastAPI(
 def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate], db: Session = Depends(get_db)):
     is_bulk = isinstance(payload, list)
     events = payload if is_bulk else [payload]
+
     unique_events = {}
     for e in events:
         if e.event_id not in unique_events:
             unique_events[e.event_id] = e
+
     incoming_ids = list(unique_events.keys())
     existing_events = db.query(models.Event.id).filter(models.Event.id.in_(incoming_ids)).all()
     existing_ids = {e.id for e in existing_events}
@@ -50,52 +53,56 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
         else:
             return {"message": "Event already processed"}
 
-    # Fetch existing related records
-        merchant_ids = {e.merchant_id for e in new_events_data}
-        transaction_ids = {e.transaction_id for e in new_events_data}
+    merchant_ids = {e.merchant_id for e in new_events_data}
+    transaction_ids = {e.transaction_id for e in new_events_data}
 
-        existing_merchants = {
-            m.id for m in db.query(models.Merchant.id).filter(models.Merchant.id.in_(merchant_ids)).all()
-        }
-        existing_txs = {
-            t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
-        }
+    existing_merchants = {
+        m.id: m for m in db.query(models.Merchant).filter(models.Merchant.id.in_(merchant_ids)).all()
+    }
+    existing_txs = {
+        t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
+    }
 
-        new_merchants = {}
-        new_transactions = {}
-        new_events = []
+    new_merchants = {}
+    new_transactions = {}
+    new_event_objs = []
 
-        for event in new_events_data:
-            if event.merchant_id not in existing_merchants and event.merchant_id not in new_merchants:
-                new_merchants[event.merchant_id] = {"id": event.merchant_id, "name": event.merchant_name}
-            if event.transaction_id not in existing_txs:
-                if event.transaction_id not in new_transactions:
-                    new_transactions[event.transaction_id] = {
-                        "id": event.transaction_id,
-                        "merchant_id": event.merchant_id,
-                        "amount": event.amount,
-                        "currency": event.currency,
-                        "status": event.event_type
-                    }
-                else:
-                    new_transactions[event.transaction_id]["status"] = event.event_type
+    for event in new_events_data:
+        if event.merchant_id not in existing_merchants and event.merchant_id not in new_merchants:
+            new_m = models.Merchant(id=event.merchant_id, name=event.merchant_name)
+            new_merchants[event.merchant_id] = new_m
+
+        if event.transaction_id not in existing_txs:
+            if event.transaction_id not in new_transactions:
+                new_tx = models.Transaction(
+                    id=event.transaction_id,
+                    merchant_id=event.merchant_id,
+                    amount=event.amount,
+                    currency=event.currency,
+                    status=event.event_type
+                )
+                new_transactions[event.transaction_id] = new_tx
             else:
-                existing_txs[event.transaction_id].status = event.event_type
-            new_events.append({
-                "id": event.event_id,
-                "transaction_id": event.transaction_id,
-                "event_type": event.event_type,
-                "timestamp": event.timestamp
-            })
+                new_transactions[event.transaction_id].status = event.event_type
+        else:
+            existing_txs[event.transaction_id].status = event.event_type
 
-        if new_merchants:
-            db.bulk_insert_mappings(models.Merchant, list(new_merchants.values()))
-        if new_transactions:
-            db.bulk_insert_mappings(models.Transaction, list(new_transactions.values()))
-        if new_events:
-            db.bulk_insert_mappings(models.Event, new_events)
+        new_event_obj = models.Event(
+            id=event.event_id,
+            transaction_id=event.transaction_id,
+            event_type=event.event_type,
+            timestamp=event.timestamp
+        )
+        new_event_objs.append(new_event_obj)
 
-        db.commit()
+    if new_merchants:
+        db.add_all(list(new_merchants.values()))
+    if new_transactions:
+        db.add_all(list(new_transactions.values()))
+    if new_event_objs:
+        db.add_all(new_event_objs)
+
+    db.commit()
 
     if is_bulk:
         return {
@@ -105,6 +112,8 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
         }
     else:
         return {"message": "Event ingested successfully"}
+
+
 @app.get("/transactions", response_model=list[schemas.TransactionResponse])
 def list_transactions(
     merchant_id: str = None,
@@ -124,6 +133,7 @@ def list_transactions(
         query = query.filter(models.Transaction.status == status)
     return query.order_by(models.Transaction.created_at.desc()).offset(skip).limit(page_size).all()
 
+
 @app.get("/transactions/{transaction_id}", response_model=schemas.TransactionResponse)
 def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
     tx = db.query(models.Transaction).filter(models.Transaction.id == transaction_id).first()
@@ -131,6 +141,7 @@ def get_transaction(transaction_id: str, db: Session = Depends(get_db)):
     if not tx:
         raise HTTPException(status_code=404, detail="Transaction not found")
     return tx
+
 
 @app.get("/reconciliation/summary")
 def get_reconciliation_summary(db: Session = Depends(get_db)):
@@ -156,16 +167,18 @@ def get_reconciliation_summary(db: Session = Depends(get_db)):
         })
     return result
 
+
 @app.get("/reconciliation/discrepancies")
 def get_discrepancies(db: Session = Depends(get_db)):
-    # Discrepancy 1: Settlement recorded for a failed payment
     settled_but_failed = db.query(models.Transaction).join(models.Event).filter(
         models.Transaction.status == "settled",
         models.Event.event_type == "payment_failed"
     ).all()
+
     processed_not_settled = db.query(models.Transaction).filter(
         models.Transaction.status == "payment_processed"
     ).all()
+
     def format_grouped_discrepancies(transactions):
         grouped_data = {}
         for tx in transactions:
