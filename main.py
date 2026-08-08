@@ -50,51 +50,62 @@ def ingest_event(payload: Union[List[schemas.EventCreate], schemas.EventCreate],
         else:
             return {"message": "Event already processed"}
 
-    merchant_ids = {e.merchant_id for e in new_events_data}
-    transaction_ids = {e.transaction_id for e in new_events_data}
+    # Fetch existing related records
+        merchant_ids = {e.merchant_id for e in new_events_data}
+        transaction_ids = {e.transaction_id for e in new_events_data}
 
-    existing_merchants = {
-        m.id for m in db.query(models.Merchant.id).filter(models.Merchant.id.in_(merchant_ids)).all()
-    }
-    existing_txs = {
-        t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
-    }
-    new_merchants = []
-    new_transactions = []
-    new_events = []
-    added_merchants = set(existing_merchants)
+        existing_merchants = {
+            m.id for m in db.query(models.Merchant.id).filter(models.Merchant.id.in_(merchant_ids)).all()
+        }
+        existing_txs = {
+            t.id: t for t in db.query(models.Transaction).filter(models.Transaction.id.in_(transaction_ids)).all()
+        }
 
-    for event in new_events_data:
-        if event.merchant_id not in added_merchants:
-            new_merchants.append({"id": event.merchant_id, "name": event.merchant_name})
-            added_merchants.add(event.merchant_id)
+        # Prepare raw dictionaries for bulk insert
+        new_merchants = {}
+        new_transactions = {}
+        new_events = []
 
-        if event.transaction_id not in existing_txs:
-            new_transactions.append({
-                "id": event.transaction_id,
-                "merchant_id": event.merchant_id,
-                "amount": event.amount,
-                "currency": event.currency,
-                "status": event.event_type
+        for event in new_events_data:
+            # Handle Merchant
+            if event.merchant_id not in existing_merchants and event.merchant_id not in new_merchants:
+                new_merchants[event.merchant_id] = {"id": event.merchant_id, "name": event.merchant_name}
+
+            # Handle Transaction
+            if event.transaction_id not in existing_txs:
+                if event.transaction_id not in new_transactions:
+                    # Create the initial state
+                    new_transactions[event.transaction_id] = {
+                        "id": event.transaction_id,
+                        "merchant_id": event.merchant_id,
+                        "amount": event.amount,
+                        "currency": event.currency,
+                        "status": event.event_type
+                    }
+                else:
+                    # Dynamically update the status in the pending dictionary
+                    new_transactions[event.transaction_id]["status"] = event.event_type
+            else:
+                # Update the existing tracked SQLAlchemy object
+                existing_txs[event.transaction_id].status = event.event_type
+
+            # Handle Event
+            new_events.append({
+                "id": event.event_id,
+                "transaction_id": event.transaction_id,
+                "event_type": event.event_type,
+                "timestamp": event.timestamp
             })
-            existing_txs[event.transaction_id] = models.Transaction(status=event.event_type)
-        else:
-            existing_txs[event.transaction_id].status = event.event_type
 
-        new_events.append({
-            "id": event.event_id,
-            "transaction_id": event.transaction_id,
-            "event_type": event.event_type,
-            "timestamp": event.timestamp
-        })
-    if new_merchants:
-        db.bulk_insert_mappings(models.Merchant, new_merchants)
-    if new_transactions:
-        db.bulk_insert_mappings(models.Transaction, new_transactions)
-    if new_events:
-        db.bulk_insert_mappings(models.Event, new_events)
+        # Execute ultra-fast bulk inserts
+        if new_merchants:
+            db.bulk_insert_mappings(models.Merchant, list(new_merchants.values()))
+        if new_transactions:
+            db.bulk_insert_mappings(models.Transaction, list(new_transactions.values()))
+        if new_events:
+            db.bulk_insert_mappings(models.Event, new_events)
 
-    db.commit()
+        db.commit()
 
     if is_bulk:
         return {
